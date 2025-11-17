@@ -402,12 +402,11 @@ useEffect(() => {
       const doc = new jsPDF();
       doc.text("Customers List", 14, 20);
 
-      const tableColumn = ["Username", "Full Name", "Email", "Phone", "Status"];
+      const tableColumn = ["Username", "Full Name", "Email", "Status"];
       const tableRows = customers.map((c) => [
         c.username || "",
         c.full_name || "",
         c.email || "",
-        c.phone_number || "",
         c.status,
       ]);
 
