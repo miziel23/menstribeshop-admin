@@ -1,5 +1,5 @@
 // deno-lint-ignore-file
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { supabase } from "../lib/supabaseClient.js";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -103,7 +103,10 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
   // ☁️ Upload Image
   const uploadImage = async () => {
     try {
-      if (!newProduct.imageFile) return newProduct.image_url;
+      if (!newProduct.imageFile) {
+        // no new file selected — return existing url (may be empty string)
+        return newProduct.image_url ?? "";
+      }
 
       const ext = newProduct.imageFile.name.split(".").pop();
       const fileName = `${Date.now()}.${ext}`;
@@ -116,14 +119,14 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
         reader.readAsArrayBuffer(newProduct.imageFile);
       });
 
-      const { error } = await supabase.storage.from("product-images").upload(filePath, blob, { upsert: true });
-      if (error) throw error;
+      const { error: uploadError } = await supabase.storage.from("product-images").upload(filePath, blob, { upsert: true });
+      if (uploadError) throw uploadError;
 
       const { data } = supabase.storage.from("product-images").getPublicUrl(filePath);
-      return data.publicUrl;
+      return data?.publicUrl ?? "";
     } catch (error) {
-      console.error("Image upload error:", error.message);
-      alert("Image upload failed");
+      console.error("Image upload error:", error?.message || error);
+      // return null to indicate a failure (different from empty string no-image)
       return null;
     }
   };
@@ -141,8 +144,10 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
     }
 
     const imageUrl = await uploadImage();
-    if (!imageUrl) {
+    if (imageUrl === null) {
+      // upload failed
       setLoadingProductSave(false);
+      alert("Image upload failed. Please try again.");
       return;
     }
 
@@ -153,7 +158,7 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       stock: parseInt(stock, 10),
       category,
       weight,
-      image_url: imageUrl
+      image_url: imageUrl // may be empty string if no image
     };
 
     try {
@@ -161,11 +166,24 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       let notifMessage = "";
 
       if (id) {
-        await supabase.from("products").update(payload).eq("id", id);
+        const { data, error } = await supabase
+          .from("products")
+          .update(payload)
+          .eq("id", id)
+          .select()
+          .single();
+
+        if (error) throw error;
         action = "updated";
         notifMessage = `✏️ Product "${name}" has been updated.`;
       } else {
-        await supabase.from("products").insert([payload]);
+        const { data, error } = await supabase
+          .from("products")
+          .insert([payload])
+          .select()
+          .single();
+
+        if (error) throw error;
         action = "added";
         notifMessage = `🛍️ New product alert! "${name}" is now available with ${stock} in stock.`;
       }
@@ -187,80 +205,12 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
         image_url: ""
       });
     } catch (error) {
-      console.error(error);
-      alert("An unexpected error occurred.");
+      console.error("Save product error:", error);
+      alert("Failed to save product: " + (error?.message || error));
     } finally {
       setLoadingProductSave(false);
     }
   };
-  
-  // Real-time updates: subscribe to products changes and refetch when events occur.
-  useEffect(() => {
-    let subscription = null;
-
-    const subscribeRealtime = async () => {
-      try {
-        // Supabase JS v2: channel + postgres_changes
-        if (supabase.channel) {
-          subscription = supabase
-            .channel("products-realtime")
-            .on(
-              "postgres_changes",
-              { event: "*", schema: "public", table: "products" },
-              (payload) => {
-                console.info("Realtime products event:", payload);
-                fetchProducts();
-              }
-            )
-            .subscribe();
-          return;
-        }
-
-        // Supabase JS v1: from(...).on(...).subscribe()
-        if (supabase.from) {
-          subscription = supabase
-            .from("products")
-            .on("*", (payload) => {
-              console.info("Realtime products event:", payload);
-              fetchProducts();
-            })
-            .subscribe();
-          return;
-        }
-
-        console.warn("Supabase realtime API not found on client.");
-      } catch (err) {
-        console.error("Error setting up realtime subscription:", err);
-      }
-    };
-
-    subscribeRealtime();
-
-    return () => {
-      try {
-        if (!subscription) return;
-
-        // Try v2 removal
-        if (supabase.removeChannel && subscription && subscription.topic) {
-          supabase.removeChannel(subscription);
-          return;
-        }
-
-        // Try unsubscribing object
-        if (typeof subscription.unsubscribe === "function") {
-          subscription.unsubscribe();
-          return;
-        }
-
-        // Try v1 removal
-        if (supabase.removeSubscription) {
-          supabase.removeSubscription(subscription);
-        }
-      } catch (err) {
-        console.error("Error unsubscribing realtime:", err);
-      }
-    };
-  }, []);
 
   const downloadProductsPDF = () => {
     try {
