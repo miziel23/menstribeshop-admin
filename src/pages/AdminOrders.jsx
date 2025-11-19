@@ -680,10 +680,10 @@ export default function AdminOrders() {
       <div>
         <span className="font-medium">Name:</span>
         <div className="flex items-center gap-2 ml-2">
-          <span>{selectedOrder.address.full_name}</span>
+          <span>{selectedOrder.address.Recipient_name}</span>
           <button
             onClick={() =>
-              navigator.clipboard.writeText(selectedOrder.address.full_name)
+              navigator.clipboard.writeText(selectedOrder.address.Recipient_name)
             }
             className="text-green-600 hover:text-green-800 text-xs font-medium"
           >
