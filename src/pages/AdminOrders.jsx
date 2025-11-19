@@ -50,6 +50,74 @@ export default function AdminOrders() {
     computeTabCounts();
   }, [orders, searchTerm]);
 
+  // Real-time updates: subscribe to orders changes and refetch when events occur.
+  useEffect(() => {
+    let subscription = null;
+
+    const subscribeRealtime = async () => {
+      try {
+        // Supabase JS v2: channel + postgres_changes
+        if (supabase.channel) {
+          subscription = supabase
+            .channel("orders-realtime")
+            .on(
+              "postgres_changes",
+              { event: "*", schema: "public", table: "orders" },
+              (payload) => {
+                console.info("Realtime orders event:", payload);
+                fetchOrders();
+              }
+            )
+            .subscribe();
+          return;
+        }
+
+        // Supabase JS v1: from(...).on(...).subscribe()
+        if (supabase.from) {
+          subscription = supabase
+            .from("orders")
+            .on("*", (payload) => {
+              console.info("Realtime orders event:", payload);
+              fetchOrders();
+            })
+            .subscribe();
+          return;
+        }
+
+        console.warn("Supabase realtime API not found on client.");
+      } catch (err) {
+        console.error("Error setting up realtime subscription:", err);
+      }
+    };
+
+    subscribeRealtime();
+
+    return () => {
+      try {
+        if (!subscription) return;
+
+        // Try v2 removal
+        if (supabase.removeChannel && subscription && subscription.topic) {
+          supabase.removeChannel(subscription);
+          return;
+        }
+
+        // Try unsubscribing object
+        if (typeof subscription.unsubscribe === "function") {
+          subscription.unsubscribe();
+          return;
+        }
+
+        // Try v1 removal
+        if (supabase.removeSubscription) {
+          supabase.removeSubscription(subscription);
+        }
+      } catch (err) {
+        console.error("Error unsubscribing realtime:", err);
+      }
+    };
+  }, []);
+
   const fetchOrders = async () => {
     setLoading(true);
     try {
@@ -113,21 +181,59 @@ export default function AdminOrders() {
   };
 
   const handleStatusChange = async (orderId, newStatus) => {
-    try {
-      setUpdatingId(orderId);
-      const { error } = await supabase
-        .from("orders")
-        .update({ status: newStatus })
-        .eq("id", orderId);
-      if (error) throw error;
-      await fetchOrders();
-    } catch (err) {
-      console.error("Error updating status:", err.message);
-      alert("Failed to update order status.");
-    } finally {
-      setUpdatingId(null);
+  try {
+    setUpdatingId(orderId);
+
+    // Get the order first
+    const { data: orderData, error: orderError } = await supabase
+      .from("orders")
+      .select("id, items, status")
+      .eq("id", orderId)
+      .single();
+    if (orderError) throw orderError;
+
+    // Only deduct stock when moving from Pending → To Ship
+    if (orderData.status === "Pending" && newStatus === "To Ship") {
+      const items = Array.isArray(orderData.items) ? orderData.items : [];
+
+      for (const item of items) {
+        const productId = item.product_id || item.id || item.productId;
+        const quantity = item.quantity || 0;
+
+        // Reduce stock
+        const { data: product, error: productError } = await supabase
+          .from("products")
+          .select("stock")
+          .eq("id", productId)
+          .single();
+        if (productError) throw productError;
+
+        const newStock = Math.max((product.stock || 0) - quantity, 0);
+
+        const { error: updateStockError } = await supabase
+          .from("products")
+          .update({ stock: newStock })
+          .eq("id", productId);
+        if (updateStockError) throw updateStockError;
+      }
     }
-  };
+
+    // Update order status
+    const { error: statusError } = await supabase
+      .from("orders")
+      .update({ status: newStatus })
+      .eq("id", orderId);
+    if (statusError) throw statusError;
+
+    await fetchOrders();
+  } catch (err) {
+    console.error("Error updating status:", err.message);
+    alert("Failed to update order status or deduct stock.");
+  } finally {
+    setUpdatingId(null);
+  }
+};
+
 
   // Cancel with reason modal
   const handleCancelOrder = async () => {
