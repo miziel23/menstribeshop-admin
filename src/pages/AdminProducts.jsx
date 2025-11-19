@@ -1,5 +1,5 @@
 // deno-lint-ignore-file
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { supabase } from "../lib/supabaseClient.js";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -11,6 +11,25 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
   const [stockAmount, setStockAmount] = useState("");
   const [loadingProductSave, setLoadingProductSave] = useState(false);
   const [loadingStockSave, setLoadingStockSave] = useState(false);
+  // loading while fetching products (short, realtime-friendly)
+  const [loading, setLoading] = useState(true);
+
+  // helper that ensures a very short visible loading (to avoid flicker)
+  const loadProducts = async () => {
+    if (typeof fetchProducts !== "function") return setLoading(false);
+    setLoading(true);
+    const start = Date.now();
+    try {
+      await fetchProducts();
+    } catch (err) {
+      console.error("fetchProducts error:", err);
+    } finally {
+      const elapsed = Date.now() - start;
+      const minVisible = 350; // ms, not too long
+      const wait = elapsed < minVisible ? minVisible - elapsed : 0;
+      setTimeout(() => setLoading(false), wait);
+    }
+  };
 
   const [newProduct, setNewProduct] = useState({
     id: null,
@@ -26,6 +45,29 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
 
   const LOW_STOCK_THRESHOLD = 5;
   const categories = ["Hair Product", "Perfume", "Hair Cutting Tool"];
+
+  // Realtime subscription -> auto refresh list on any insert/update/delete
+  useEffect(() => {
+    // supabase-js v2 Realtime API
+    const channel = supabase
+      .channel("products-realtime")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "products" },
+        (payload) => {
+          console.log("Realtime products change:", payload);
+          // show short loading while re-fetching
+          loadProducts();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      // unsubscribe / remove channel on unmount
+      if (supabase.removeChannel) supabase.removeChannel(channel);
+      else channel.unsubscribe();
+    };
+  }, [fetchProducts]);
 
   // 📸 File Change
   const handleFileChange = (e) => {
@@ -92,7 +134,7 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       alert("Failed to update stock.");
     } else {
       await sendProductNotification(`📦 Stock updated for "${stockProduct.name}". New stock: ${newStock}`);
-      fetchProducts();
+      loadProducts();
       alert(`✅ Stock updated. Current stock: ${newStock}`);
       setShowStockModal(false);
     }
@@ -103,10 +145,7 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
   // ☁️ Upload Image
   const uploadImage = async () => {
     try {
-      if (!newProduct.imageFile) {
-        // no new file selected — return existing url (may be empty string)
-        return newProduct.image_url ?? "";
-      }
+      if (!newProduct.imageFile) return newProduct.image_url;
 
       const ext = newProduct.imageFile.name.split(".").pop();
       const fileName = `${Date.now()}.${ext}`;
@@ -119,14 +158,14 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
         reader.readAsArrayBuffer(newProduct.imageFile);
       });
 
-      const { error: uploadError } = await supabase.storage.from("product-images").upload(filePath, blob, { upsert: true });
-      if (uploadError) throw uploadError;
+      const { error } = await supabase.storage.from("product-images").upload(filePath, blob, { upsert: true });
+      if (error) throw error;
 
       const { data } = supabase.storage.from("product-images").getPublicUrl(filePath);
-      return data?.publicUrl ?? "";
+      return data.publicUrl;
     } catch (error) {
-      console.error("Image upload error:", error?.message || error);
-      // return null to indicate a failure (different from empty string no-image)
+      console.error("Image upload error:", error.message);
+      alert("Image upload failed");
       return null;
     }
   };
@@ -144,10 +183,8 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
     }
 
     const imageUrl = await uploadImage();
-    if (imageUrl === null) {
-      // upload failed
+    if (!imageUrl) {
       setLoadingProductSave(false);
-      alert("Image upload failed. Please try again.");
       return;
     }
 
@@ -158,7 +195,7 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       stock: parseInt(stock, 10),
       category,
       weight,
-      image_url: imageUrl // may be empty string if no image
+      image_url: imageUrl
     };
 
     try {
@@ -166,24 +203,11 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       let notifMessage = "";
 
       if (id) {
-        const { data, error } = await supabase
-          .from("products")
-          .update(payload)
-          .eq("id", id)
-          .select()
-          .single();
-
-        if (error) throw error;
+        await supabase.from("products").update(payload).eq("id", id);
         action = "updated";
         notifMessage = `✏️ Product "${name}" has been updated.`;
       } else {
-        const { data, error } = await supabase
-          .from("products")
-          .insert([payload])
-          .select()
-          .single();
-
-        if (error) throw error;
+        await supabase.from("products").insert([payload]);
         action = "added";
         notifMessage = `🛍️ New product alert! "${name}" is now available with ${stock} in stock.`;
       }
@@ -191,7 +215,7 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       await sendProductNotification(notifMessage);
 
       alert(`Product successfully ${action}!`);
-      fetchProducts();
+      loadProducts();
       setShowProductModal(false);
       setNewProduct({
         id: null,
@@ -205,8 +229,8 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
         image_url: ""
       });
     } catch (error) {
-      console.error("Save product error:", error);
-      alert("Failed to save product: " + (error?.message || error));
+      console.error(error);
+      alert("An unexpected error occurred.");
     } finally {
       setLoadingProductSave(false);
     }
@@ -274,6 +298,12 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
     }
   };
 
+  // fetch on mount
+  useEffect(() => {
+    loadProducts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="p-4">
       <div className="flex justify-between mb-4">
@@ -299,69 +329,73 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       </div>
 
       {/* ✅ Products Table */}
-      <div className="overflow-x-auto border rounded-lg shadow">
-        <table className="w-full text-sm border table-fixed">
-          <thead className="bg-gray-100">
-            <tr>
-              <th className="p-2 border w-20">Image</th>
-              <th className="p-2 border w-36">Name</th>
-              <th className="p-2 border w-64">Description</th>
-              <th className="p-2 border w-32">Category</th>
-              <th className="p-2 border w-24">Weight</th>
-              <th className="p-2 border w-24">Price</th>
-              <th className="p-2 border w-24">Stock</th>
-              <th className="p-2 border w-36">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {products.map((p) => (
-              <tr
-                key={p.id}
-                className={`${p.stock <= LOW_STOCK_THRESHOLD ? "bg-red-200" : ""}`}
-              >
-                <td className="p-2 border text-center align-top">
-                  <img
-                    src={p.image_url}
-                    alt={p.name}
-                    className="w-10 h-10 object-cover rounded mx-auto"
-                  />
-                </td>
-                <td className="p-2 border align-top break-words">{p.name}</td>
-                <td className="p-2 border align-top break-words whitespace-normal">{p.description}</td>
-                <td className="p-2 border align-top break-words">{p.category}</td>
-                <td className="p-2 border align-top">{p.weight}</td>
-                <td className="p-2 border align-top">PHP {p.price}</td>
-                <td className="p-2 border align-top">{p.stock}</td>
-                <td className="p-2 border align-middle">
-                  <div className="flex justify-center items-center gap-2">
-                    <button
-                      title="Add Stock"
-                      onClick={() => openStockModal(p)}
-                      className="px-2 py-1 bg-green-500 rounded text-white hover:bg-green-600"
-                    >
-                      ➕
-                    </button>
-                    <button
-                      title="Edit Product"
-                      onClick={() => openProductModal(p)}
-                      className="px-2 py-1 bg-yellow-400 rounded text-white hover:bg-yellow-500"
-                    >
-                      ✏️
-                    </button>
-                    <button
-                      title="Delete Product"
-                      onClick={() => deleteProduct(p.id)}
-                      className="px-2 py-1 bg-red-500 rounded text-white hover:bg-red-600"
-                    >
-                      🗑️
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {loading ? (
+        <div className="p-8 flex items-center justify-center text-gray-600">Loading products...</div>
+      ) : (
+        <div className="overflow-x-auto border rounded-lg shadow">
+          <table className="w-full text-sm border table-fixed">
+           <thead className="bg-gray-100">
+             <tr>
+               <th className="p-2 border w-20">Image</th>
+               <th className="p-2 border w-36">Name</th>
+               <th className="p-2 border w-64">Description</th>
+               <th className="p-2 border w-32">Category</th>
+               <th className="p-2 border w-24">Weight</th>
+               <th className="p-2 border w-24">Price</th>
+               <th className="p-2 border w-24">Stock</th>
+               <th className="p-2 border w-36">Action</th>
+             </tr>
+           </thead>
+           <tbody>
+             {products.map((p) => (
+               <tr
+                 key={p.id}
+                 className={`${p.stock <= LOW_STOCK_THRESHOLD ? "bg-red-200" : ""}`}
+               >
+                 <td className="p-2 border text-center align-top">
+                   <img
+                     src={p.image_url}
+                     alt={p.name}
+                     className="w-10 h-10 object-cover rounded mx-auto"
+                   />
+                 </td>
+                 <td className="p-2 border align-top break-words">{p.name}</td>
+                 <td className="p-2 border align-top break-words whitespace-normal">{p.description}</td>
+                 <td className="p-2 border align-top break-words">{p.category}</td>
+                 <td className="p-2 border align-top">{p.weight}</td>
+                 <td className="p-2 border align-top">PHP {p.price}</td>
+                 <td className="p-2 border align-top">{p.stock}</td>
+                 <td className="p-2 border align-middle">
+                   <div className="flex justify-center items-center gap-2">
+                     <button
+                       title="Add Stock"
+                       onClick={() => openStockModal(p)}
+                       className="px-2 py-1 bg-green-500 rounded text-white hover:bg-green-600"
+                     >
+                       ➕
+                     </button>
+                     <button
+                       title="Edit Product"
+                       onClick={() => openProductModal(p)}
+                       className="px-2 py-1 bg-yellow-400 rounded text-white hover:bg-yellow-500"
+                     >
+                       ✏️
+                     </button>
+                     <button
+                       title="Delete Product"
+                       onClick={() => deleteProduct(p.id)}
+                       className="px-2 py-1 bg-red-500 rounded text-white hover:bg-red-600"
+                     >
+                       🗑️
+                     </button>
+                   </div>
+                 </td>
+               </tr>
+             ))}
+           </tbody>
+         </table>
+       </div>
+      )}
 
       {/* 🪄 Product Modal */}
       {showProductModal && (
@@ -437,8 +471,7 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
                 className="px-4 py-2 bg-green-600 text-white rounded flex items-center justify-center gap-2"
                 disabled={loadingProductSave}
               >
-                {loadingProductSave && <span className="loader-border h-4 w-4 border-2 border-white rounded-full animate-spin"></span>}
-                Save
+                {loadingProductSave ? "Saving..." : "Save"}
               </button>
             </div>
           </div>
@@ -473,8 +506,7 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
                 className="px-4 py-2 bg-green-600 text-white rounded flex items-center justify-center gap-2"
                 disabled={loadingStockSave}
               >
-                {loadingStockSave && <span className="loader-border h-4 w-4 border-2 border-white rounded-full animate-spin"></span>}
-                Save
+                {loadingStockSave ? "Saving..." : "Save"}
               </button>
             </div>
           </div>
