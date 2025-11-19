@@ -39,8 +39,8 @@ export default function Dashboard() {
   // -------------------- CHART STATES ADDED --------------------
   const [salesData, setSalesData] = useState([]);
   const [ordersData, setOrdersData] = useState([]);
-  const [salesFilter, setSalesFilter] = useState("monthly");
-  const [orderFilter, setOrderFilter] = useState("monthly");
+  const [salesFilter, setSalesFilter] = useState("weekly");
+  const [orderFilter, setOrderFilter] = useState("weekly");
   const [showProfileMenu, setShowProfileMenu] = useState(false);
 
   const [showProductModal, setShowProductModal] = useState(false);
@@ -120,43 +120,129 @@ const fetchAllOrders = async () => {
 // -------------------- PREPARE CHART DATA --------------------
 const prepareChartData = async () => {
   setLoading(true);
-  const [completedSales, allOrders] = await Promise.all([
-    fetchCompletedSales(),
-    fetchAllOrders(),
-  ]);
+  const [completedSales, allOrders] = await Promise.all([fetchCompletedSales(), fetchAllOrders()]);
 
-  // ----- GROUP SALES BY DATE -----
-  const groupedSalesMap = {};
-  completedSales.forEach((sale) => {
-    const saleDate = new Date(sale.date).toLocaleDateString("en-PH");
-    if (!groupedSalesMap[saleDate]) groupedSalesMap[saleDate] = { date: saleDate, total: 0, Online: 0, "On Store": 0 };
+  const toStartOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+  const toEndOfDay = (d) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 
-    const amount = Number(sale.total) || 0;
-    groupedSalesMap[saleDate].total += amount;
-
-    const key = sale.sold_by ? sale.sold_by.trim() : "Other";
-    if (key === "Online" || key === "On Store") groupedSalesMap[saleDate][key] += amount;
-  });
-
-  const groupedSales = Object.values(groupedSalesMap);
-  setSalesData(groupedSales);
-
-  // ----- GROUP ORDERS BY DATE -----
-  const groupedOrdersMap = {};
-  allOrders.forEach((order) => {
-    const date = new Date(order.created_at).toLocaleDateString("en-PH");
-    if (!groupedOrdersMap[date]) {
-      groupedOrdersMap[date] = { date, Pending: 0, PaidToShip: 0, ToReceive: 0, Completed: 0, Cancelled: 0 };
+  // Return inclusive start/end for the selected filter anchored to "now"
+  const rangeForFilter = (filter) => {
+    const now = new Date();
+    if (filter === "daily") {
+      return { start: toStartOfDay(now), end: toEndOfDay(now) };
     }
+    if (filter === "weekly") {
+      const s = toStartOfDay(now);
+      s.setDate(s.getDate() - s.getDay()); // Sunday
+      const e = new Date(s); e.setDate(s.getDate() + 6);
+      return { start: toStartOfDay(s), end: toEndOfDay(e) };
+    }
+    if (filter === "monthly") {
+      const s = new Date(now.getFullYear(), now.getMonth(), 1);
+      const e = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      return { start: toStartOfDay(s), end: toEndOfDay(e) };
+    }
+    // yearly
+    const s = new Date(now.getFullYear(), 0, 1);
+    const e = new Date(now.getFullYear(), 11, 31);
+    return { start: toStartOfDay(s), end: toEndOfDay(e) };
+  };
 
-    if (order.status === "Pending") groupedOrdersMap[date].Pending += 1;
-    else if (order.status === "Paid" || order.status === "To Ship") groupedOrdersMap[date].PaidToShip += 1;
-    else if (order.status === "To Receive") groupedOrdersMap[date].ToReceive += 1;
-    else if (order.status === "Completed") groupedOrdersMap[date].Completed += 1;
-    else if (order.status === "Cancelled") groupedOrdersMap[date].Cancelled += 1;
+  const salesRange = rangeForFilter(salesFilter);
+  const orderRange = rangeForFilter(orderFilter);
+
+  const generatePeriods = (filter, startDt, endDt) => {
+    const periods = [];
+    if (filter === "daily") {
+      // single day -> one bucket (label is date)
+      const label = startDt.toLocaleDateString("en-PH");
+      periods.push({ label, start: startDt, end: endDt, ts: startDt.getTime() });
+      return periods;
+    }
+    if (filter === "weekly") {
+      // days of the week within start..end (7 days)
+      const cur = new Date(startDt);
+      for (let i = 0; i < 7; i++) {
+        const day = new Date(cur);
+        day.setDate(startDt.getDate() + i);
+        const s = toStartOfDay(day);
+        const e = toEndOfDay(day);
+        const label = s.toLocaleDateString("en-PH");
+        periods.push({ label, start: s, end: e, ts: s.getTime() });
+      }
+      return periods;
+    }
+    if (filter === "monthly") {
+      // every day of the month
+      const s = new Date(startDt.getFullYear(), startDt.getMonth(), 1);
+      const last = new Date(startDt.getFullYear(), startDt.getMonth() + 1, 0).getDate();
+      for (let d = 1; d <= last; d++) {
+        const day = new Date(startDt.getFullYear(), startDt.getMonth(), d);
+        const sDay = toStartOfDay(day);
+        const eDay = toEndOfDay(day);
+        const label = sDay.toLocaleDateString("en-PH");
+        periods.push({ label, start: sDay, end: eDay, ts: sDay.getTime() });
+      }
+      return periods;
+    }
+    // yearly -> each month of the year
+    const year = startDt.getFullYear();
+    for (let m = 0; m < 12; m++) {
+      const s = new Date(year, m, 1);
+      const e = new Date(year, m + 1, 0);
+      const label = s.toLocaleString("en-PH", { month: "short", year: "numeric" });
+      periods.push({ label, start: toStartOfDay(s), end: toEndOfDay(e), ts: s.getTime() });
+    }
+    return periods;
+  };
+
+  const salesPeriods = generatePeriods(salesFilter, salesRange.start, salesRange.end);
+  const orderPeriods = generatePeriods(orderFilter, orderRange.start, orderRange.end);
+
+  const initSalesBucket = (label) => ({ date: label, total: 0, Online: 0, "On Store": 0 });
+  const salesBuckets = Object.fromEntries(salesPeriods.map((p) => [p.label, { ...initSalesBucket(p.label), __ts: p.ts, start: p.start, end: p.end }]));
+
+  const initOrderBucket = (label) => ({ date: label, Pending: 0, PaidToShip: 0, ToReceive: 0, Completed: 0, Cancelled: 0 });
+  const orderBuckets = Object.fromEntries(orderPeriods.map((p) => [p.label, { ...initOrderBucket(p.label), __ts: p.ts, start: p.start, end: p.end }]));
+
+  const findBucketKey = (buckets) => (dt) => {
+    const t = new Date(dt).getTime();
+    for (const key of Object.keys(buckets)) {
+      const b = buckets[key];
+      if (t >= b.start.getTime() && t <= b.end.getTime()) return key;
+    }
+    return null;
+  };
+
+  const salesFinder = findBucketKey(salesBuckets);
+  completedSales.forEach((sale) => {
+    const dt = new Date(sale.date || sale.created_at || new Date());
+    const key = salesFinder(dt);
+    if (!key) return;
+    const amount = Number(sale.total) || 0;
+    salesBuckets[key].total += amount;
+    const who = sale.sold_by ? sale.sold_by.trim() : "Other";
+    if (who === "Online" || who === "On Store") salesBuckets[key][who] += amount;
   });
 
-  setOrdersData(Object.values(groupedOrdersMap));
+  const orderFinder = findBucketKey(orderBuckets);
+  allOrders.forEach((order) => {
+    const dt = new Date(order.created_at);
+    const key = orderFinder(dt);
+    if (!key) return;
+    if (order.status === "Pending") orderBuckets[key].Pending += 1;
+    else if (order.status === "Paid" || order.status === "To Ship") orderBuckets[key].PaidToShip += 1;
+    else if (order.status === "To Receive") orderBuckets[key].ToReceive += 1;
+    else if (order.status === "Completed") orderBuckets[key].Completed += 1;
+    else if (order.status === "Cancelled") orderBuckets[key].Cancelled += 1;
+  });
+
+  const groupedSales = Object.values(salesBuckets).sort((a, b) => a.__ts - b.__ts).map(({ __ts, start, end, ...rest }) => rest);
+  const groupedOrders = Object.values(orderBuckets).sort((a, b) => a.__ts - b.__ts).map(({ __ts, start, end, ...rest }) => rest);
+
+  setSalesData(groupedSales);
+  setOrdersData(groupedOrders);
+
   setLoading(false);
 };
 
