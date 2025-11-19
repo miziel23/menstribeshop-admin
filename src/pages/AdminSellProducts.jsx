@@ -1,5 +1,5 @@
 // deno-lint-ignore-file
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabaseClient.js";
 import { v4 as uuidv4 } from "uuid"; // ✅ Import UUID generator
 
@@ -10,6 +10,30 @@ export default function AdminSellProducts({ products, fetchProducts }) {
   const [receiptItems, setReceiptItems] = useState([]);
   const [transactionInfo, setTransactionInfo] = useState({});
   const [isProcessing, setIsProcessing] = useState(false);
+  // loading while fetching products (short, realtime-friendly)
+  const [loading, setLoading] = useState(true);
+  const loadTimeoutRef = useRef(null);
+
+  // helper that ensures a very short visible loading (to avoid flicker)
+  const loadProducts = async () => {
+    if (typeof fetchProducts !== "function") return setLoading(false);
+    setLoading(true);
+    const start = Date.now();
+    try {
+      await fetchProducts();
+    } catch (err) {
+      console.error("fetchProducts error:", err);
+    } finally {
+      const elapsed = Date.now() - start;
+      const minVisible = 350; // ms
+      const wait = elapsed < minVisible ? minVisible - elapsed : 0;
+      if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+      loadTimeoutRef.current = setTimeout(() => {
+        setLoading(false);
+        loadTimeoutRef.current = null;
+      }, wait);
+    }
+  };
 
   // ✅ Toggle product selection
   const toggleProduct = (productId) => {
@@ -113,7 +137,8 @@ export default function AdminSellProducts({ products, fetchProducts }) {
       alert("✅ Sale confirmed and recorded successfully!");
 
       // Reset states
-      fetchProducts();
+      // show short loading when refetching product list
+      loadProducts();
       setSelectedProducts({});
       setQuantities({});
       setShowReceipt(false);
@@ -131,6 +156,15 @@ export default function AdminSellProducts({ products, fetchProducts }) {
     setShowReceipt(false);
   };
 
+  // fetch on mount
+  useEffect(() => {
+    loadProducts();
+    return () => {
+      if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="p-4">
       <div className="flex justify-between mb-4">
@@ -138,59 +172,63 @@ export default function AdminSellProducts({ products, fetchProducts }) {
       </div>
 
       {/* 🧾 Product Table */}
-      <div className="overflow-x-auto border rounded-lg shadow">
-        <table className="w-full text-sm border table-fixed">
-          <thead className="bg-gray-100">
-            <tr>
-              <th className="p-2 border w-10 text-center">✔</th>
-              <th className="p-2 border w-20">Image</th>
-              <th className="p-2 border w-36">Name</th>
-              <th className="p-2 border w-64">Description</th>
-              <th className="p-2 border w-32">Category</th>
-              <th className="p-2 border w-24">Price</th>
-              <th className="p-2 border w-24">Stock</th>
-              <th className="p-2 border w-32">Quantity to Sell</th>
-            </tr>
-          </thead>
-          <tbody>
-            {products.map((p) => (
-              <tr key={p.id}>
-                <td className="p-2 border text-center">
-                  <input
-                    type="checkbox"
-                    checked={!!selectedProducts[p.id]}
-                    onChange={() => toggleProduct(p.id)}
-                  />
-                </td>
-                <td className="p-2 border text-center align-top">
-                  <img
-                    src={p.image_url}
-                    alt={p.name}
-                    className="w-10 h-10 object-cover rounded mx-auto"
-                  />
-                </td>
-                <td className="p-2 border align-top break-words">{p.name}</td>
-                <td className="p-2 border align-top break-words whitespace-normal">
-                  {p.description}
-                </td>
-                <td className="p-2 border align-top break-words">{p.category}</td>
-                <td className="p-2 border align-top">₱ {p.price}</td>
-                <td className="p-2 border align-top">{p.stock}</td>
-                <td className="p-2 border text-center">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    className="border p-1 w-20 text-center rounded"
-                    value={quantities[p.id] || ""}
-                    onChange={(e) => handleQuantityChange(p.id, e.target.value)}
-                    disabled={!selectedProducts[p.id]}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {loading ? (
+        <div className="p-8 flex items-center justify-center text-gray-600">Loading products...</div>
+      ) : (
+        <div className="overflow-x-auto border rounded-lg shadow">
+          <table className="w-full text-sm border table-fixed">
+           <thead className="bg-gray-100">
+             <tr>
+               <th className="p-2 border w-10 text-center">✔</th>
+               <th className="p-2 border w-20">Image</th>
+               <th className="p-2 border w-36">Name</th>
+               <th className="p-2 border w-64">Description</th>
+               <th className="p-2 border w-32">Category</th>
+               <th className="p-2 border w-24">Price</th>
+               <th className="p-2 border w-24">Stock</th>
+               <th className="p-2 border w-32">Quantity to Sell</th>
+             </tr>
+           </thead>
+           <tbody>
+             {products.map((p) => (
+               <tr key={p.id}>
+                 <td className="p-2 border text-center">
+                   <input
+                     type="checkbox"
+                     checked={!!selectedProducts[p.id]}
+                     onChange={() => toggleProduct(p.id)}
+                   />
+                 </td>
+                 <td className="p-2 border text-center align-top">
+                   <img
+                     src={p.image_url}
+                     alt={p.name}
+                     className="w-10 h-10 object-cover rounded mx-auto"
+                   />
+                 </td>
+                 <td className="p-2 border align-top break-words">{p.name}</td>
+                 <td className="p-2 border align-top break-words whitespace-normal">
+                   {p.description}
+                 </td>
+                 <td className="p-2 border align-top break-words">{p.category}</td>
+                 <td className="p-2 border align-top">₱ {p.price}</td>
+                 <td className="p-2 border align-top">{p.stock}</td>
+                 <td className="p-2 border text-center">
+                   <input
+                     type="text"
+                     inputMode="numeric"
+                     className="border p-1 w-20 text-center rounded"
+                     value={quantities[p.id] || ""}
+                     onChange={(e) => handleQuantityChange(p.id, e.target.value)}
+                     disabled={!selectedProducts[p.id]}
+                   />
+                 </td>
+               </tr>
+             ))}
+           </tbody>
+          </table>
+        </div>
+      )}
 
       {/* 💰 Sell Button */}
       <div className="flex justify-end mt-4">
