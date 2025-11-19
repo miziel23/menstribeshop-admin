@@ -1,5 +1,5 @@
 // deno-lint-ignore-file
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { supabase } from "../lib/supabaseClient.js";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -193,6 +193,74 @@ export default function AdminProducts({ products, fetchProducts, sendProductNoti
       setLoadingProductSave(false);
     }
   };
+  
+  // Real-time updates: subscribe to products changes and refetch when events occur.
+  useEffect(() => {
+    let subscription = null;
+
+    const subscribeRealtime = async () => {
+      try {
+        // Supabase JS v2: channel + postgres_changes
+        if (supabase.channel) {
+          subscription = supabase
+            .channel("products-realtime")
+            .on(
+              "postgres_changes",
+              { event: "*", schema: "public", table: "products" },
+              (payload) => {
+                console.info("Realtime products event:", payload);
+                fetchProducts();
+              }
+            )
+            .subscribe();
+          return;
+        }
+
+        // Supabase JS v1: from(...).on(...).subscribe()
+        if (supabase.from) {
+          subscription = supabase
+            .from("products")
+            .on("*", (payload) => {
+              console.info("Realtime products event:", payload);
+              fetchProducts();
+            })
+            .subscribe();
+          return;
+        }
+
+        console.warn("Supabase realtime API not found on client.");
+      } catch (err) {
+        console.error("Error setting up realtime subscription:", err);
+      }
+    };
+
+    subscribeRealtime();
+
+    return () => {
+      try {
+        if (!subscription) return;
+
+        // Try v2 removal
+        if (supabase.removeChannel && subscription && subscription.topic) {
+          supabase.removeChannel(subscription);
+          return;
+        }
+
+        // Try unsubscribing object
+        if (typeof subscription.unsubscribe === "function") {
+          subscription.unsubscribe();
+          return;
+        }
+
+        // Try v1 removal
+        if (supabase.removeSubscription) {
+          supabase.removeSubscription(subscription);
+        }
+      } catch (err) {
+        console.error("Error unsubscribing realtime:", err);
+      }
+    };
+  }, []);
 
   const downloadProductsPDF = () => {
     try {
