@@ -56,13 +56,16 @@ export default function Dashboard() {
   });
 
   const LOW_STOCK_THRESHOLD = 5;
-  const adminId = '2552afba-8d5e-4824-9c57-dcbc18541606'; // Admin ID
+  // derive current admin id from auth session instead of hardcoding
+  const [adminId, setAdminId] = useState(null);
 
   // -------------------- FETCH FUNCTIONS --------------------
   const fetchAdminName = async () => {
     const { data, error } = await supabase.auth.getUser();
     if (!error && data?.user?.user_metadata?.full_name) {
       setAdminName(data.user.user_metadata.full_name);
+      // set current admin id for messages / realtime usage
+      setAdminId(data.user.id);
     }
   };
 
@@ -549,6 +552,7 @@ const toggleCustomerStatus = async (id, currentStatus) => {
 
   // -------------------- FETCH INBOX --------------------
   const fetchInbox = async () => {
+    if (!adminId) return; // wait until we have admin id
     try {
       const { data: messages, error } = await supabase
         .from("messages")
@@ -605,6 +609,7 @@ const toggleCustomerStatus = async (id, currentStatus) => {
 
   // -------------------- FETCH CHAT --------------------
   const fetchChatMessages = async (customer) => {
+    if (!adminId) return;
     try {
       const { data, error } = await supabase
         .from("messages")
@@ -670,6 +675,8 @@ const toggleCustomerStatus = async (id, currentStatus) => {
 
   // -------------------- REAL-TIME UPDATES --------------------
   useEffect(() => {
+    // don't subscribe or fetch chats until we know adminId
+    if (!adminId) return;
     fetchInbox();
     fetchCustomers();
 
@@ -776,10 +783,10 @@ const toggleCustomerStatus = async (id, currentStatus) => {
     channelRef.current = { chatChannel, customerChannel };
 
     return () => {
-      supabase.removeChannel(channelRef.current.chatChannel);
-      supabase.removeChannel(channelRef.current.customerChannel);
+      if (channelRef.current?.chatChannel) supabase.removeChannel(channelRef.current.chatChannel);
+      if (channelRef.current?.customerChannel) supabase.removeChannel(channelRef.current.customerChannel);
     };
-  }, [openChats]);
+  }, [openChats, adminId]);
 
   // -------------------- UI PART: INBOX --------------------
   const renderInboxDropdown = () => (
@@ -907,8 +914,10 @@ const toggleCustomerStatus = async (id, currentStatus) => {
   <button
     className="text-white rounded-full hover:text-gray-300 relative"
     onClick={() => {
-      setShowInbox(!showInbox);
-      fetchInbox();
+      const next = !showInbox;
+      setShowInbox(next);
+      setShowProfileMenu(false); // close profile when opening inbox
+      if (next) fetchInbox();
     }}
   >
     💬
@@ -923,7 +932,11 @@ const toggleCustomerStatus = async (id, currentStatus) => {
   <div className="relative">
     <button
       className="text-block rounded-full hover:text-gray-300"
-      onClick={() => setShowProfileMenu(!showProfileMenu)}
+      onClick={() => {
+        const next = !showProfileMenu;
+        setShowProfileMenu(next);
+        setShowInbox(false); // close inbox when opening profile
+      }}
     >
       <User size={22} />
     </button>
@@ -1194,7 +1207,11 @@ case "Profile":
           {['Home', 'Customers','Products','Sell Products',  'Orders', 'Sales', 'Discounts', 'Payment Settings'].map(tab => (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => {
+                setActiveTab(tab);
+                setShowInbox(false);
+                setShowProfileMenu(false);
+              }}
               className={`text-center px-4 py-2 rounded font-bold ${
                 activeTab === tab
                   ? 'bg-green-700 text-white'
